@@ -25,14 +25,15 @@ def get_aep_timeseries():
 
 def get_pjme_timeseries():
     dir_path = os.path.dirname(os.path.realpath(__file__))
-    df = pd.read_csv(f'{dir_path}/data/PJME_hourly.csv')
+    df = pd.read_excel(os.path.join(dir_path, "PJME_hourly.xlsx"))
     ts = df['PJME_MW'].astype(int).values.reshape(-1, 1)[-3000:]
     return ts
 
 
 def get_ni_timeseries():
     dir_path = os.path.dirname(os.path.realpath(__file__))
-    df = pd.read_csv(f'{dir_path}/data/NI_hourly.csv')
+    df = pd.read_excel(os.path.join(dir_path, "NI_hourly.xlsx"))
+
     ts = df['NI_MW'].astype(int).values.reshape(-1, 1)[-3000:]
     return ts
 

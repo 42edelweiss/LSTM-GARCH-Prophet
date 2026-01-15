@@ -1,0 +1,259 @@
+/*==============================================================================
+  ANALYSE COMPLETE D'UNE SERIE HETEROSCEDASTIQUE AVEC ARCH/GARCH
+  
+  Objectif : Modéliser une série temporelle avec :
+  - Tendance linéaire
+  - Autocorrélation AR(2)
+  - Hétéroscédasticité (variance changeante dans le temps)
+  
+  Auteur : Code d'exemple pour apprentissage ARCH/GARCH
+==============================================================================*/
+
+
+/*------------------------------------------------------------------------------
+  ETAPE 1 : SIMULATION DE LA SERIE HETEROSCEDASTIQUE
+  
+  - 120 observations
+  - Tendance : y = 10 + 0.5*time
+  - Bruit : AR(2) avec u = 1.3*u(t-1) - 0.5*u(t-2) + epsilon
+  - Variance : passe de 1 à 4 entre les dates 60 et 90
+------------------------------------------------------------------------------*/
+
+data a;
+    ul = 0; 
+    ull = 0;
+    
+    do time = -10 to 120;
+        /* Variance conditionnelle selon la période */
+        s = 1 + (time >= 60 & time < 90);
+        
+        /* Processus AR(2) avec variance variable */
+        u = 1.3 * ul - 0.5 * ull + s * rannor(12346);
+        
+        /* Série observée = tendance + bruit */
+        y = 10 + 0.5 * time + u;
+        
+        /* Ne garder que les observations positives */
+        if time > 0 then output;
+        
+        /* Mise à jour des retards */
+        ull = ul;
+        ul = u;
+    end;
+run;
+
+
+/*------------------------------------------------------------------------------
+  ETAPE 2 : VISUALISATION DE LA SERIE BRUTE
+  
+  Graphique montrant la série avec régression linéaire superposée
+------------------------------------------------------------------------------*/
+
+title "Heteroscedastic Autocorrelated Time Series";
+
+proc gplot data=a;
+    symbol1 v=star i=join;
+    symbol2 v=none i=r;
+    plot y * time = 1 y * time = 2 / overlay;
+run;
+
+goption reset=global;
+
+
+/*------------------------------------------------------------------------------
+  ETAPE 3 : EXPLORATION INITIALE - IDENTIFICATION DE L'ORDRE AR
+  
+  - Méthode : Maximum de vraisemblance
+  - Sélection automatique de l'ordre AR optimal (jusqu'à 10 retards)
+  - BACKSTEP : Elimination régressive des retards non significatifs
+------------------------------------------------------------------------------*/
+
+proc autoreg data=a;
+    model y = time / method=ml nlag=10 backstep;
+run;
+
+
+/*------------------------------------------------------------------------------
+  ETAPE 4 : DIAGNOSTIC D'HETEROSCEDASTICITE
+  
+  - ARCHTEST : Test de Engle pour effets ARCH
+  - DWPROB : Test de Durbin-Watson
+  - Si test ARCH significatif => besoin de modèle GARCH
+------------------------------------------------------------------------------*/
+
+proc autoreg data=a;
+    model y = time / nlag=2 archtest dwprob;
+run;
+
+
+/*------------------------------------------------------------------------------
+  ETAPE 5 : ANALYSE DES RESIDUS AU CARRE
+  
+  Vérifier si les résidus au carré sont autocorrélés
+  (indicateur de structure ARCH/GARCH)
+------------------------------------------------------------------------------*/
+
+data r;
+    set r;
+    varres = yresid * yresid;
+run;
+
+proc arima data=r;
+    identify var=varres nlag=12;
+run;
+
+
+/*------------------------------------------------------------------------------
+  ETAPE 6 : MODELISATION GARCH(1,1) COMPLETE
+  
+  Modèle estimé :
+  - Equation de la moyenne : AR(2) avec tendance
+    y(t) = beta0 + beta1*time + phi1*y(t-1) + phi2*y(t-2) + epsilon(t)
+  
+  - Equation de la variance : GARCH(1,1)
+    sigma²(t) = alpha0 + alpha1*epsilon²(t-1) + beta1*sigma²(t-1)
+  
+  Sorties générées :
+  - p_garch : Prévisions ponctuelles
+  - r_garch : Résidus
+  - cpev : Variance conditionnelle de prévision
+  - vhat : Variance conditionnelle estimée (cev)
+  - ucl, lcl : Intervalles de confiance
+------------------------------------------------------------------------------*/
+
+proc autoreg data=a;
+    model y = time / nlag=2 garch=(q=1, p=1) maxit=50;
+    output out=out 
+           p=p_garch 
+           ucl=u 
+           lcl=l 
+           r=r_garch 
+           cpev=cpev 
+           cev=vhat;
+run;
+
+
+/*------------------------------------------------------------------------------
+  ETAPE 7 : CALCUL DES INTERVALLES DE CONFIANCE CONDITIONNELS
+  
+  Intervalles basés sur la variance conditionnelle (pas la variance moyenne)
+------------------------------------------------------------------------------*/
+
+data out;
+    set out;
+    /* Intervalles à +/- 2 écarts-types conditionnels */
+    u_garch = p_garch + 2 * sqrt(cpev);
+    l_garch = p_garch - 2 * sqrt(cpev);
+run;
+
+proc print data=out;
+    var u_garch p_garch y l_garch r_garch;
+    title 'AR(2) - GARCH(1,1) model forecasts';
+run;
+
+
+/*------------------------------------------------------------------------------
+  ETAPE 8 : COMPARAISON ECART-TYPE REEL VS ESTIME
+  
+  - s : Ecart-type vrai utilisé dans la simulation
+  - shat : Ecart-type conditionnel estimé par GARCH
+  
+  Permet de vérifier si GARCH capture bien la variance changeante
+------------------------------------------------------------------------------*/
+
+data out;
+    set out;
+    shat = sqrt(vhat);
+run;
+
+title "Predicted and Actual Standard Deviations";
+
+proc gplot data=out;
+    plot s*time=1 shat*time=2 / overlay;
+    symbol1 v=star i=join;
+    symbol2 v=none i=join;
+run;
+
+goption reset=global;
+
+
+/*------------------------------------------------------------------------------
+  ETAPE 9 : PREVISIONS HORS ECHANTILLON
+  
+  Créer 10 périodes futures (t=121 à 130) pour prévision
+------------------------------------------------------------------------------*/
+
+data b;
+    y = .;
+    do time = 121 to 130;
+        output;
+    end;
+run;
+
+/* Fusion données historiques + périodes futures */
+data b;
+    merge a b;
+    by time;
+run;
+
+
+/*------------------------------------------------------------------------------
+  ETAPE 10 : PREVISIONS AVEC GARCH(1,1)
+  
+  Sorties :
+  - yhat : Prévision ponctuelle
+  - ytrend : Tendance déterministe
+  - lcl, ucl : Intervalles de confiance conditionnels
+------------------------------------------------------------------------------*/
+
+proc autoreg data=b;
+    model y = time / nlag=2 garch=(q=1, p=1) maxit=50;
+    output out=p 
+           p=yhat 
+           pm=ytrend 
+           lcl=lcl 
+           ucl=ucl;
+run;
+
+
+/*------------------------------------------------------------------------------
+  ETAPE 11 : VISUALISATION FINALE - PREVISIONS
+  
+  Affiche :
+  - Dernières 20 observations historiques (time >= 100)
+  - 10 prévisions futures
+  - Tendance déterministe
+  - Intervalles de confiance
+  - Ligne verticale à t=120.5 séparant historique/prévision
+------------------------------------------------------------------------------*/
+
+title "Serie heteroscedastique - Previsions GARCH(1,1)";
+
+proc gplot data=p;
+    plot y*time=1 
+         yhat*time=2 
+         ytrend*time=3 
+         lcl*time=3 
+         ucl*time=3 / overlay href=120.5;
+    where time >= 100;
+    symbol1 v=star i=join;      /* Données observées */
+    symbol2 v=circle i=join;    /* Prévisions */
+    symbol3 v=none i=join;      /* Tendance et IC */
+run;
+
+quit;
+
+
+/*==============================================================================
+  NOTES D'INTERPRETATION
+  
+  1. Si test ARCH significatif => variance non constante => GARCH approprié
+  
+  2. GARCH(1,1) suffit souvent (équivalent ARMA(1,1) pour la variance)
+  
+  3. Intervalles de confiance s'élargissent/rétrécissent selon volatilité estimée
+  
+  4. Comparer shat vs s montre si GARCH capture bien l'hétéroscédasticité
+  
+  5. Pour données financières : souvent besoin de GARCH même sans rupture
+==============================================================================*/
